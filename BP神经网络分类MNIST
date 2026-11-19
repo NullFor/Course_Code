@@ -1,0 +1,72 @@
+"""BP神经网络分类MNIST"""
+from pathlib import Path
+import csv
+import os
+import urllib.request
+os.environ["OPENBLAS_NUM_THREADS"] = "2"
+import numpy as np
+
+base = Path(__file__).resolve().parent
+archive = base / "mnist.npz"
+if not archive.exists():
+    urllib.request.urlretrieve("https://storage.googleapis.com/tensorflow/tf-keras-datasets/mnist.npz", archive)
+data = np.load(archive)
+x = data["x_train"].reshape(-1, 784).astype("float32") / 255
+y = data["y_train"]
+xt = data["x_test"].reshape(-1, 784).astype("float32") / 255
+yt = data["y_test"]
+assert x.shape == (60000, 784) and xt.shape == (10000, 784)
+order = np.random.default_rng(42).permutation(len(x))
+train, valid = order[:55000], order[55000:]
+
+def evaluate(features, labels, params):
+    w, b, v, c = params
+    logits = np.maximum(features @ w + b, 0) @ v + c
+    return int((logits.argmax(axis=1) == labels).sum())
+
+def fit(name, width, rate, batch_log, epoch_log):
+    init = np.random.default_rng(7)
+    shuffle = np.random.default_rng(8)
+    w = (init.normal(size=(784,width))*np.sqrt(2/784)).astype("float32")
+    v = (init.normal(size=(width,10))*np.sqrt(2/width)).astype("float32")
+    b = np.zeros(width, "float32")
+    c = np.zeros(10, "float32")
+    step = 0
+    for epoch in range(1, 9):
+        indices = shuffle.permutation(train)
+        total = 0.
+        for start in range(0,len(indices),128):
+            ids = indices[start:start+128]
+            features, labels = x[ids], y[ids]
+            hidden = np.maximum(features @ w + b, 0)
+            logits = hidden @ v + c
+            logits -= logits.max(axis=1,keepdims=True)
+            probs = np.exp(logits)
+            probs /= probs.sum(axis=1,keepdims=True)
+            row = np.arange(len(ids))
+            loss = -np.log(probs[row,labels]).mean()
+            total += float(loss)*len(ids)
+            step += 1
+            batch_log.writerow([name,epoch,step,len(ids),float(loss)])
+            probs[row,labels] -= 1
+            delta = probs / len(ids)
+            back = (delta @ v.T)*(hidden>0)
+            v -= rate*(hidden.T @ delta)
+            c -= rate*delta.sum(axis=0)
+            w -= rate*(features.T @ back)
+            b -= rate*back.sum(axis=0)
+        correct = evaluate(x[valid],y[valid],(w,b,v,c))
+        epoch_log.writerow([name,width,rate,epoch,total/len(train),correct/len(valid)])
+    return correct,(w,b,v,c)
+
+if __name__ == "__main__":
+    configs = [('A',64,.05),('B',64,.01),('C',128,.05)]
+    with (base/'iterations.csv').open('w',newline='') as it,(base/'epochs.csv').open('w',newline='') as ep:
+        batches, epochs = csv.writer(it),csv.writer(ep)
+        batches.writerow(['group','epoch','step','batch_size','cross_entropy'])
+        epochs.writerow(['group','hidden_units','learning_rate','epoch','mean_loss','validation_accuracy'])
+        results = [fit(*cfg,batches,epochs) for cfg in configs]
+    best = max(range(len(results)), key=lambda i:results[i][0])
+    correct = evaluate(xt,yt,results[best][1])
+    (base/'test.txt').write_text(f'{configs[best][0]} {correct} {len(yt)}', encoding='utf-8')
+    print(configs[best],correct,len(yt))
